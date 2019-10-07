@@ -58,6 +58,7 @@ struct user_ta_ctx {
 	struct tee_storage_enum_head storage_enums;
 	vaddr_t stack_ptr;
 	void *ta_time_offs;
+	vaddr_t load_addr;
 	struct user_mode_ctx uctx;
 };
 
