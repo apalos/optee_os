@@ -14,6 +14,9 @@
 #include <zlib.h>
 
 #include "thread_private.h"
+#include <tee/tee_svc_storage.h>
+#include <crypto/crypto.h>
+#include <tee_api_defines_extensions.h>
 
 static const TEE_UUID stmm_uuid = PTA_STMM_UUID;
 
@@ -491,6 +494,12 @@ static void set_svc_retval(struct thread_svc_regs *regs, uint64_t ret_val)
 
 static bool stmm_handle_svc(struct thread_svc_regs *regs)
 {
+	uint32_t flags = TEE_DATA_FLAG_ACCESS_READ |
+		TEE_DATA_FLAG_ACCESS_WRITE |
+		TEE_DATA_FLAG_SHARE_READ |
+		TEE_DATA_FLAG_SHARE_WRITE;
+	TEE_Result res = TEE_SUCCESS;
+
 	switch (regs->x0) {
 	case SP_SVC_VERSION:
 		set_svc_retval(regs, SP_VERSION);
@@ -505,6 +514,22 @@ static bool stmm_handle_svc(struct thread_svc_regs *regs)
 		set_svc_retval(regs,
 			       sp_svc_set_mem_attr(regs->x1, regs->x2,
 						   regs->x3));
+		return true;
+	case SP_SVC_RPMB_READ:
+		res = sec_storage_obj_read(TEE_STORAGE_PRIVATE_RPMB,
+					   (void*)regs->x1, regs->x2,
+					   (void*)regs->x3, regs->x4,
+					   flags);
+		set_svc_retval(regs, res);
+
+		return true;
+	case SP_SVC_RPMB_WRITE:
+		res = sec_storage_obj_write(TEE_STORAGE_PRIVATE_RPMB,
+					    (void*)regs->x1, regs->x2,
+					    (void*)regs->x3, regs->x4, regs->x5,
+					    flags, regs->x6);
+		set_svc_retval(regs, res);
+
 		return true;
 	default:
 		EMSG("Undefined syscall 0x%"PRIx32, (uint32_t)regs->x0);
