@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause
 /*
+ * Copyright (c) 2020, Arm Limited. All rights reserved.
  * Copyright (c) 2019, Linaro Limited
  */
 
@@ -14,12 +15,18 @@
 #include <tee/tee_pobj.h>
 #include <zlib.h>
 
+#include <ffa.h>
 #include "thread_private.h"
 #include <tee/tee_svc_storage.h>
 #include <crypto/crypto.h>
 #include <tee_api_defines_extensions.h>
 
 static const TEE_UUID stmm_uuid = PTA_STMM_UUID;
+
+static const uint16_t stmm_id = 1U;
+static const uint16_t stmm_pta_id = 2U;
+static const uint16_t mem_mgr_id = 3U;
+static const uint16_t ffa_storage_id = 4U;
 
 static const unsigned int stmm_entry;
 static const unsigned int stmm_stack_size = 4 * SMALL_PAGE_SIZE;
@@ -154,7 +161,7 @@ static TEE_Result alloc_nxp_io(struct sec_part_ctx *spc)
 {
  	TEE_Result res;
  	vaddr_t uart_va = 0;
-	res = alloc_and_map_io(spc, 0x021C0000, 0x00001000,
+	res = alloc_and_map_io(spc, 0x09040000, 0x00001000,
  			       TEE_MATTR_URW | TEE_MATTR_PRW,
  			       &uart_va, 0, 0);
  	if (res) {
@@ -391,10 +398,14 @@ static TEE_Result stmm_enter_invoke_cmd(struct tee_ta_session *s,
 	if (res)
 		return res;
 
-	spc->regs.x[0] = 0xc4000041; /* 64-bit MM_COMMUNICATE */
-	spc->regs.x[1] = spc->ns_comm_buf_addr;
-	spc->regs.x[2] = ns_buf_size;
-	spc->regs.x[3] = 0;
+	spc->regs.x[0] = FFA_MSG_SEND_DIRECT_REQ_64;
+	spc->regs.x[1] = (stmm_pta_id << 16) | stmm_id;
+	spc->regs.x[2] = FFA_PARAM_MBZ;
+	spc->regs.x[3] = spc->ns_comm_buf_addr;
+	spc->regs.x[4] = ns_buf_size;
+	spc->regs.x[5] = 0;
+	spc->regs.x[6] = 0;
+	spc->regs.x[7] = 0;
 
 	tee_ta_push_current_session(s);
 
@@ -402,6 +413,8 @@ static TEE_Result stmm_enter_invoke_cmd(struct tee_ta_session *s,
 	       ns_buf_size);
 
 	res = sec_part_enter_user_mode(spc);
+
+	/* Error handling TBD */
 	if (!res)
 		param->u[1].val.a = spc->regs.x[1];
 
@@ -507,26 +520,35 @@ static bool return_helper(bool panic, uint32_t panic_code,
 	return false;
 }
 
-#ifdef ARM32
-static void set_svc_retval(struct thread_svc_regs *regs, uint32_t ret_val)
+static void service_compose_direct_resp(struct thread_svc_regs *regs,
+					uint32_t ret_val)
 {
-	regs->r0 = ret_val;
-}
-#endif /*ARM32*/
+	uint16_t src_id;
+	uint16_t dst_id;
 
-#ifdef ARM64
-static void set_svc_retval(struct thread_svc_regs *regs, uint64_t ret_val)
-{
-	regs->x0 = ret_val;
-}
-#endif /*ARM64*/
+	/* extract from request */
+	src_id = (regs->x1 >> 16) & 0xFFFF;
+	dst_id = regs->x1 & 0xFFFF;
 
+	/* compose message */
+	regs->x0 = FFA_MSG_SEND_DIRECT_RESP_64;
+	/* swap endpoint ids */
+	regs->x1 = (dst_id << 16) | src_id;
+	regs->x2 = FFA_PARAM_MBZ;
+	regs->x3 = ret_val;
+	regs->x4 = 0;
+	regs->x5 = 0;
+	regs->x6 = 0;
+	regs->x7 = 0;
+}
+
+
+#define FILENAME "EFI_VARS"
 /*
  * Combined read from secure partition, this will open, read and
  * close the fh
  */
-static TEE_Result sec_storage_obj_read(unsigned long storage_id, void *obj_id,
-				       size_t obj_id_len, void *data,
+static TEE_Result sec_storage_obj_read(unsigned long storage_id, void *data,
 				       size_t len, size_t offset,
 				       unsigned long flags)
 
@@ -540,6 +562,8 @@ static TEE_Result sec_storage_obj_read(unsigned long storage_id, void *obj_id,
 	size_t file_size = 0;
 	size_t read_len = 0;
 	size_t tmp = 0;
+	char obj_id[] = FILENAME;
+	size_t obj_id_len = sizeof(obj_id);
 
 	fops = tee_svc_storage_file_ops(storage_id);
 	if (!fops)
@@ -608,7 +632,6 @@ release:
  * close the fh
  */
 static TEE_Result sec_storage_obj_write(unsigned long storage_id,
-					void *obj_id, size_t obj_id_len,
 					void *data, size_t len, size_t offset,
 					unsigned long flags)
 
@@ -620,6 +643,8 @@ static TEE_Result sec_storage_obj_write(unsigned long storage_id,
 	TEE_Result res = TEE_SUCCESS;
 	struct tee_pobj *po = NULL;
 	size_t tmp = 0;
+	char obj_id[] = FILENAME;
+	size_t obj_id_len = sizeof(obj_id);
 
 	fops = tee_svc_storage_file_ops(storage_id);
 	if (!fops)
@@ -670,8 +695,26 @@ release:
 	return res;
 }
 
+static bool stmm_handle_mem_mgr_service(struct thread_svc_regs *regs)
+{
+	switch (regs->x3) {
+	case SP_SVC_MEMORY_ATTRIBUTES_GET_64:
+		service_compose_direct_resp(regs,
+			       SP_MEM_ATTR_EXEC | SP_MEM_ATTR_ACCESS_RW);
+		return true;
+	case SP_SVC_MEMORY_ATTRIBUTES_SET_64:
+		service_compose_direct_resp(regs,
+			       sp_svc_set_mem_attr(regs->x4, regs->x5,
+						   regs->x6));
+		return true;
+	default:
+		EMSG("Undefined service id 0x%"PRIx32, (uint32_t)regs->x3);
+		service_compose_direct_resp(regs, SP_RET_INVALID_PARAM);
+		return true;
+	}
+}
 
-static bool stmm_handle_svc(struct thread_svc_regs *regs)
+static bool stmm_handle_storage_service(struct thread_svc_regs *regs)
 {
 	uint32_t flags = TEE_DATA_FLAG_ACCESS_READ |
 		TEE_DATA_FLAG_ACCESS_WRITE |
@@ -679,40 +722,73 @@ static bool stmm_handle_svc(struct thread_svc_regs *regs)
 		TEE_DATA_FLAG_SHARE_WRITE;
 	TEE_Result res = TEE_SUCCESS;
 
-	switch (regs->x0) {
-	case SP_SVC_VERSION:
-		set_svc_retval(regs, SP_VERSION);
-		return true;
-	case SP_SVC_EVENT_COMPLETE_64:
-		return return_helper(false, 0, regs);
-	case SP_SVC_MEMORY_ATTRIBUTES_GET_64:
-		set_svc_retval(regs,
-			       SP_MEM_ATTR_EXEC | SP_MEM_ATTR_ACCESS_RW);
-		return true;
-	case SP_SVC_MEMORY_ATTRIBUTES_SET_64:
-		set_svc_retval(regs,
-			       sp_svc_set_mem_attr(regs->x1, regs->x2,
-						   regs->x3));
-		return true;
+	switch (regs->x3) {
 	case SP_SVC_RPMB_READ:
 		res = sec_storage_obj_read(TEE_STORAGE_PRIVATE_RPMB,
-					   (void*)regs->x1, regs->x2,
-					   (void*)regs->x3, regs->x4,
-					   regs->x5, flags);
-		set_svc_retval(regs, res);
+					   (void*)regs->x4, regs->x5,
+					   regs->x6, flags);
+		service_compose_direct_resp(regs, res);
 
 		return true;
 	case SP_SVC_RPMB_WRITE:
 		res = sec_storage_obj_write(TEE_STORAGE_PRIVATE_RPMB,
-					    (void*)regs->x1, regs->x2,
-					    (void*)regs->x3, regs->x4, regs->x5,
-					    flags);
-		set_svc_retval(regs, res);
+					    (void*)regs->x4, regs->x5,
+					    regs->x6, flags);
+		service_compose_direct_resp(regs, res);
 
 		return true;
 	default:
+		EMSG("Undefined service id 0x%"PRIx32, (uint32_t)regs->x3);
+		service_compose_direct_resp(regs, SP_RET_INVALID_PARAM);
+		return true;
+	}
+}
+
+static bool spm_eret_error(int32_t error_code, struct thread_svc_regs *regs)
+{
+	regs->x0 = FFA_ERROR;
+	regs->x1 = FFA_PARAM_MBZ;
+	regs->x2 = (uint64_t)error_code;
+	regs->x3 = FFA_PARAM_MBZ;
+	regs->x4 = FFA_PARAM_MBZ;
+	regs->x5 = FFA_PARAM_MBZ;
+	regs->x6 = FFA_PARAM_MBZ;
+	regs->x7 = FFA_PARAM_MBZ;
+	return true;
+}
+
+static bool spm_handle_direct_req(struct thread_svc_regs *regs)
+{
+	uint16_t dst_id = regs->x1 & 0xFFFF;
+	/* Look-up of destination endpoint */
+	if (dst_id == mem_mgr_id || dst_id == 0)
+		return stmm_handle_mem_mgr_service(regs);
+	else if (dst_id == ffa_storage_id)
+		return stmm_handle_storage_service(regs);
+
+	EMSG("Undefined endpoint id 0x%"PRIx16, dst_id);
+	return spm_eret_error(SP_RET_INVALID_PARAM, regs);
+}
+
+static bool spm_handle_svc(struct thread_svc_regs *regs)
+{
+	switch (regs->x0) {
+	case FFA_VERSION:
+		EMSG("Received FFA version");
+		regs->x0 = FFA_VERSION;
+		return true;
+	case FFA_MSG_SEND_DIRECT_RESP_64:
+		IMSG("Received FFA direct response");
+		return return_helper(false, 0, regs);
+	case FFA_MSG_SEND_DIRECT_REQ_64:
+		IMSG("Received FFA direct request");
+		return spm_handle_direct_req(regs);
+	default:
 		EMSG("Undefined syscall 0x%"PRIx32, (uint32_t)regs->x0);
-		return return_helper(true, 0xbadfbadf, regs);
+		regs->x0 = 0;
+		regs->x1 = 1; //panic
+		regs->x2 = 0xabcd; //panic code
+		return false;
 	}
 }
 
@@ -723,7 +799,7 @@ const struct tee_ta_ops secure_partition_ops __rodata_unpaged = {
 	.dump_state = sec_part_dump_state,
 	.destroy = sec_part_ctx_destroy,
 	.get_instance_id = sec_part_get_instance_id,
-	.handle_svc = stmm_handle_svc,
+	.handle_svc = spm_handle_svc,
 };
 
 void sec_part_save_return_state(struct thread_ctx_regs *ctx_regs,
