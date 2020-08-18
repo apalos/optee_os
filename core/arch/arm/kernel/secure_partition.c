@@ -86,7 +86,7 @@ static TEE_Result sec_part_enter_user_mode(struct sec_part_ctx *spc)
 
 	exceptions = thread_mask_exceptions(THREAD_EXCP_ALL);
 	cntkctl = read_cntkctl();
-	write_cntkctl(cntkctl | 0x3);
+	write_cntkctl(cntkctl | (CNTKCTL_PL0PCTEN | CNTKCTL_PL0VCTEN));
 	__thread_enter_user_mode(&spc->regs, &panicked, &panic_code);
 	write_cntkctl(cntkctl);
 	thread_unmask_exceptions(exceptions);
@@ -95,7 +95,7 @@ static TEE_Result sec_part_enter_user_mode(struct sec_part_ctx *spc)
 
 	if (panicked) {
 		abort_print_current_ta();
-		DMSG("sec_part panicked with code 0x%"PRIx32, panic_code);
+		DMSG("sec_part panicked with code %#"PRIx32, panic_code);
 		res = TEE_ERROR_TARGET_DEAD;
 	}
 
@@ -535,7 +535,7 @@ static TEE_Result sec_storage_obj_read(unsigned long storage_id, char *obj_id,
 				       unsigned long len, unsigned long offset,
 				       unsigned long flags)
 {
-	const struct tee_file_operations *fops;
+	const struct tee_file_operations *fops = NULL;
 	TEE_Result res = TEE_ERROR_BAD_STATE;
 	struct tee_ta_session *sess = NULL;
 	struct tee_file_handle *fh = NULL;
@@ -674,7 +674,7 @@ static bool stmm_handle_mem_mgr_service(struct thread_svc_regs *regs)
 								perm));
 		return true;
 	default:
-		EMSG("Undefined service id 0x%"PRIx32, action);
+		EMSG("Undefined service id %#"PRIx32, action);
 		service_compose_direct_resp(regs, SP_RET_INVALID_PARAM);
 		return true;
 	}
@@ -709,7 +709,7 @@ static bool stmm_handle_storage_service(struct thread_svc_regs *regs)
 
 		return true;
 	default:
-		EMSG("Undefined service id 0x%"PRIx32, action);
+		EMSG("Undefined service id %#"PRIx32, action);
 		service_compose_direct_resp(regs, SP_RET_INVALID_PARAM);
 		return true;
 	}
@@ -738,7 +738,7 @@ static bool spm_handle_direct_req(struct thread_svc_regs *regs)
 	else if (dst_id == ffa_storage_id)
 		return stmm_handle_storage_service(regs);
 
-	EMSG("Undefined endpoint id 0x%"PRIx16, dst_id);
+	EMSG("Undefined endpoint id %#"PRIx16, dst_id);
 	return spm_eret_error(SP_RET_INVALID_PARAM, regs);
 }
 
@@ -756,7 +756,7 @@ static bool spm_handle_svc(struct thread_svc_regs *regs)
 		DMSG("Received FFA direct request");
 		return spm_handle_direct_req(regs);
 	default:
-		EMSG("Undefined syscall 0x%"PRIx32, (uint32_t)regs->x0);
+		EMSG("Undefined syscall %#"PRIx32, (uint32_t)regs->x0);
 		return return_helper(true /*panic*/, 0xabcd, regs);
 	}
 }
