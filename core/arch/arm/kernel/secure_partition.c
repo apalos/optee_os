@@ -4,6 +4,8 @@
  * Copyright (c) 2019, Linaro Limited
  */
 
+#include <crypto/crypto.h>
+#include <ffa.h>
 #include <kernel/abort.h>
 #include <kernel/secure_partition.h>
 #include <kernel/user_mode_ctx.h>
@@ -11,22 +13,20 @@
 #include <mm/mobj.h>
 #include <mm/tee_mmu.h>
 #include <pta_stmm.h>
-#include <tee/tee_svc.h>
+#include <tee_api_defines_extensions.h>
 #include <tee/tee_pobj.h>
+#include <tee/tee_svc.h>
+#include <tee/tee_svc_storage.h>
 #include <zlib.h>
 
-#include <ffa.h>
 #include "thread_private.h"
-#include <tee/tee_svc_storage.h>
-#include <crypto/crypto.h>
-#include <tee_api_defines_extensions.h>
 
 static const TEE_UUID stmm_uuid = PTA_STMM_UUID;
 
 /*
  * Once a complete FFA spec is added, these will become discoverable.
  * Until then these are considered part of the internal ABI between
- * OP-TEE and StMM
+ * OP-TEE and StMM.
  */
 static const uint16_t stmm_id = 1U;
 static const uint16_t stmm_pta_id = 2U;
@@ -38,7 +38,7 @@ static const unsigned int stmm_heap_size = 398 * SMALL_PAGE_SIZE;
 static const unsigned int stmm_sec_buf_size = SMALL_PAGE_SIZE;
 static const unsigned int stmm_ns_comm_buf_size = SMALL_PAGE_SIZE;
 
-extern uint8_t stmm_image[];
+extern unsigned char stmm_image[];
 extern const unsigned int stmm_image_size;
 extern const unsigned int stmm_image_uncompressed_size;
 
@@ -71,14 +71,12 @@ err:
 
 static void clear_vfp_state(struct sec_part_ctx *spc __maybe_unused)
 {
-#ifdef CFG_WITH_VFP
-	thread_user_clear_vfp(&spc->uctx.vfp);
-#endif
+	if (IS_ENABLED(CFG_WITH_VFP))
+		thread_user_clear_vfp(&spc->uctx.vfp);
 }
 
 static TEE_Result sec_part_enter_user_mode(struct sec_part_ctx *spc)
 {
-	TEE_Result res = TEE_SUCCESS;
 	uint32_t exceptions = 0;
 	uint32_t panic_code = 0;
 	uint32_t panicked = 0;
@@ -86,7 +84,7 @@ static TEE_Result sec_part_enter_user_mode(struct sec_part_ctx *spc)
 
 	exceptions = thread_mask_exceptions(THREAD_EXCP_ALL);
 	cntkctl = read_cntkctl();
-	write_cntkctl(cntkctl | (CNTKCTL_PL0PCTEN | CNTKCTL_PL0VCTEN));
+	write_cntkctl(cntkctl | CNTKCTL_PL0PCTEN);
 	__thread_enter_user_mode(&spc->regs, &panicked, &panic_code);
 	write_cntkctl(cntkctl);
 	thread_unmask_exceptions(exceptions);
@@ -96,10 +94,10 @@ static TEE_Result sec_part_enter_user_mode(struct sec_part_ctx *spc)
 	if (panicked) {
 		abort_print_current_ta();
 		DMSG("sec_part panicked with code %#"PRIx32, panic_code);
-		res = TEE_ERROR_TARGET_DEAD;
+		return TEE_ERROR_TARGET_DEAD;
 	}
 
-	return res;
+	return TEE_SUCCESS;
 }
 
 static void init_stmm_regs(struct sec_part_ctx *spc, unsigned long a0,
@@ -122,12 +120,13 @@ static TEE_Result alloc_and_map_sp_fobj(struct sec_part_ctx *spc, size_t sz,
 	fobj_put(fobj);
 	if (!mobj)
 		return TEE_ERROR_OUT_OF_MEMORY;
+
 	res = vm_map(&spc->uctx, va, num_pgs * SMALL_PAGE_SIZE,
 		     prot, 0, mobj, 0);
 	if (res)
 		mobj_put(mobj);
 
-	return res;
+	return TEE_SUCCESS;
 }
 
 static void *zalloc(void *opaque __unused, unsigned int items,
@@ -152,16 +151,14 @@ static void uncompress_image(void *dst, size_t dst_size, void *src,
 		.zalloc = zalloc,
 		.zfree = zfree,
 	};
-	int st = 0;
 
-	st = inflateInit(&strm);
-	if (st != Z_OK)
+	if (inflateInit(&strm) != Z_OK)
 		panic("inflateInit");
-	st = inflate(&strm, Z_SYNC_FLUSH);
-	if (st != Z_STREAM_END)
+
+	if (inflate(&strm, Z_SYNC_FLUSH) != Z_STREAM_END)
 		panic("inflate");
-	st = inflateEnd(&strm);
-	if (st != Z_OK)
+
+	if (inflateEnd(&strm) != Z_OK)
 		panic("inflateEnd");
 }
 
@@ -191,6 +188,10 @@ static TEE_Result load_stmm(struct sec_part_ctx *spc)
 	res = alloc_and_map_sp_fobj(spc, stmm_ns_comm_buf_size,
 				    TEE_MATTR_URW | TEE_MATTR_PRW,
 				    &comm_buf_addr);
+	/*
+	 * We don't need to free the previous instance here, they'll all be
+	 * handled during the destruction call (sec_part_ctx_destroy())
+	 */
 	if (res)
 		return res;
 
@@ -309,7 +310,7 @@ static TEE_Result stmm_enter_open_session(struct tee_ta_session *s,
 		return TEE_ERROR_BAD_PARAMETERS;
 
 	if (spc->is_initializing) {
-		/* stmm is initialized in sec_part_init_session() */
+		/* StMM is initialized in sec_part_init_session() */
 		*eo = TEE_ORIGIN_TEE;
 		return TEE_ERROR_BAD_STATE;
 	}
@@ -324,7 +325,7 @@ static TEE_Result stmm_enter_invoke_cmd(struct tee_ta_session *s,
 {
 	struct sec_part_ctx *spc = to_sec_part_ctx(s->ctx);
 	TEE_Result res = TEE_SUCCESS;
-	TEE_Result tmp_res = TEE_SUCCESS;
+	TEE_Result __maybe_unused tmp_res = TEE_SUCCESS;
 	unsigned int ns_buf_size = 0;
 	struct param_mem *mem = NULL;
 	void *va = NULL;
@@ -341,8 +342,10 @@ static TEE_Result stmm_enter_invoke_cmd(struct tee_ta_session *s,
 
 	mem = &param->u[0].mem;
 	ns_buf_size = mem->size;
-	if (ns_buf_size > spc->ns_comm_buf_size)
-		return TEE_ERROR_SHORT_BUFFER;
+	if (ns_buf_size > spc->ns_comm_buf_size) {
+		mem->size = ns_buf_size;
+		return TEE_ERROR_BAD_PARAMETERS;
+	}
 
 	res = mobj_inc_map(mem->mobj);
 	if (res)
@@ -350,8 +353,9 @@ static TEE_Result stmm_enter_invoke_cmd(struct tee_ta_session *s,
 
 	va = mobj_get_va(mem->mobj, mem->offs);
 	if (!va) {
-		EMSG("Can't get a valid VA for NS buffer\n");
-		return TEE_ERROR_BAD_PARAMETERS;
+		EMSG("Can't get a valid VA for NS buffer");
+		res = TEE_ERROR_BAD_PARAMETERS;
+		goto err_va;
 	}
 
 	spc->regs.x[0] = FFA_MSG_SEND_DIRECT_REQ_64;
@@ -369,19 +373,20 @@ static TEE_Result stmm_enter_invoke_cmd(struct tee_ta_session *s,
 
 	res = sec_part_enter_user_mode(spc);
 	if (res)
-		goto out;
+		goto err_out;
 	/*
-	 * Copy the SPM response from secure partition back to the non secure
-	 * the client that called us
+	 * Copy the SPM response from secure partition back to the non-secure
+	 * the client that called us.
 	 */
 	param->u[1].val.a = spc->regs.x[4];
 
 	memcpy(va, (void *)spc->ns_comm_buf_addr, ns_buf_size);
 
-out:
+err_out:
+	tee_ta_pop_current_session();
+err_va:
 	tmp_res = mobj_dec_map(mem->mobj);
 	assert(!tmp_res);
-	tee_ta_pop_current_session();
 
 	return res;
 }
@@ -418,17 +423,17 @@ static uint32_t sp_svc_get_mem_attr(vaddr_t va)
 	uint16_t perm = 0;
 
 	if (!va)
-		goto out;
+		goto err;
 
 	res = tee_ta_get_current_session(&sess);
 	if (res != TEE_SUCCESS)
-		goto out;
+		goto err;
 
 	spc = to_sec_part_ctx(sess->ctx);
 
 	res = vm_get_prot(&spc->uctx, va, SMALL_PAGE_SIZE, &attrs);
 	if (res)
-		goto out;
+		goto err;
 
 	if (attrs & TEE_MATTR_UR)
 		perm |= SP_MEM_ATTR_ACCESS_RO;
@@ -439,7 +444,7 @@ static uint32_t sp_svc_get_mem_attr(vaddr_t va)
 		perm |= SP_MEM_ATTR_EXEC;
 
 	return perm;
-out:
+err:
 	return SP_RET_DENIED;
 }
 
@@ -528,7 +533,7 @@ static void service_compose_direct_resp(struct thread_svc_regs *regs,
 
 /*
  * Combined read from secure partition, this will open, read and
- * close the fh
+ * close the file object.
  */
 static TEE_Result sec_storage_obj_read(unsigned long storage_id, char *obj_id,
 				       unsigned long obj_id_len, void *data,
@@ -570,27 +575,20 @@ static TEE_Result sec_storage_obj_read(unsigned long storage_id, char *obj_id,
 
 	res = po->fops->open(po, &file_size, &fh);
 	if (res != TEE_SUCCESS)
-		goto err_release;
+		goto out;
 
 	read_len = len;
 	res = po->fops->read(fh, offset, data, &read_len);
-	if (res != TEE_SUCCESS) {
-		if (res == TEE_ERROR_CORRUPT_OBJECT) {
-			EMSG("Object corrupt");
-			po->fops->remove(po);
-		}
-		goto err_close;
-	}
-
-	/* make sure we read the entire requested length */
-	if (len != read_len) {
+	if (res == TEE_ERROR_CORRUPT_OBJECT) {
+		EMSG("Object corrupt");
+		po->fops->remove(po);
+	} else if (res == TEE_SUCCESS && len != read_len) {
 		res = TEE_ERROR_CORRUPT_OBJECT;
-		goto err_close;
 	}
 
-err_close:
 	po->fops->close(&fh);
-err_release:
+
+out:
 	tee_pobj_release(po);
 
 	return res;
@@ -598,7 +596,7 @@ err_release:
 
 /*
  * Combined write from secure partition, this will create/open, write and
- * close the fh
+ * close the file object.
  */
 static TEE_Result sec_storage_obj_write(unsigned long storage_id, char *obj_id,
 					unsigned long obj_id_len, void *data,
@@ -638,20 +636,14 @@ static TEE_Result sec_storage_obj_write(unsigned long storage_id, char *obj_id,
 		return res;
 
 	res = po->fops->open(po, NULL, &fh);
-	if (res == TEE_ERROR_ITEM_NOT_FOUND) {
+	if (res == TEE_ERROR_ITEM_NOT_FOUND)
 		res = po->fops->create(po, false, NULL, 0, NULL, 0, NULL, 0,
 				       &fh);
-		if (res != TEE_SUCCESS)
-			goto err_release;
+	if (res == TEE_SUCCESS) {
+		res = po->fops->write(fh, offset, data, len);
+		po->fops->close(&fh);
 	}
 
-	res = po->fops->write(fh, offset, data, len);
-	if (res != TEE_SUCCESS)
-		goto err_close;
-
-err_close:
-	po->fops->close(&fh);
-err_release:
 	tee_pobj_release(po);
 
 	return res;

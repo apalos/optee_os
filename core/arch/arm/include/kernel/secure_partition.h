@@ -7,6 +7,7 @@
 #define __KERNEL_SECURE_PARTITION_H
 
 #include <assert.h>
+#include <config.h>
 #include <kernel/tee_ta_manager.h>
 #include <kernel/thread.h>
 #include <kernel/user_mode_ctx_struct.h>
@@ -18,12 +19,6 @@
 #define SP_RET_INVALID_PARAM	-2
 #define SP_RET_DENIED		-3
 #define SP_RET_NO_MEM		-5
-
-#define SP_VER_MAJOR_MASK	0x7FFF
-#define SP_VER_MINOR_MASK	0xFFFF
-#define SP_VER_MAJOR		(0 & SP_VER_MAJOR_MASK)
-#define SP_VER_MINOR		(1 & SP_VER_MINOR_MASK)
-#define SP_VERSION		((SP_VER_MAJOR << 16) | (SP_VER_MINOR))
 
 #define SP_MEM_ATTR_ACCESS_MASK		0x3
 #define SP_MEM_ATTR_ACCESS_NONE		0
@@ -43,13 +38,14 @@
  * FFA_SVC_MEMORY_ATTRIBUTES_SET_64:
  *  - x4: base address
  *  - x5: number of pages
- *  - x6: attributes of tha remapping (described above)
+ *  - x6: attributes of the remapping (described above)
  *
  * FFA_SVC_MEMORY_ATTRIBUTES_GET_64: currently only a single page is requested
  *  - x4: base address
  */
 #define FFA_SVC_MEMORY_ATTRIBUTES_GET_64	UINT32_C(0xC4000064)
 #define FFA_SVC_MEMORY_ATTRIBUTES_SET_64	UINT32_C(0xC4000065)
+
 /*
  * We need to define the RPMB IDs formally, since the plan is
  * for them to be included in the FFA spec (for SP-to-SP future communication).
@@ -57,13 +53,13 @@
  * EDK2 RPMB driver and Secure Partition
  *
  * FFA_SVC_RPMB_WRITE:
- *  - x4: va address of the buffer to write in the device
- *  - x5: buffer length
- *  - x6: offset in the device
+ *  - x4: virtual address of the buffer to write in the device
+ *  - x5: buffer byte length
+ *  - x6: byte offset in the device
  * FFA_SVC_RPMB_READ:
- *  - x4: va address of the buffer were RPMB contents are copied
- *  - x5: length to read
- *  - x6: offset in the device
+ *  - x4: virtual address of the buffer were RPMB contents are copied
+ *  - x5: buffer byte length to read
+ *  - x6: byte offset in the device
  */
 #define FFA_SVC_RPMB_READ		UINT32_C(0xC4000066)
 #define FFA_SVC_RPMB_WRITE		UINT32_C(0xC4000067)
@@ -82,8 +78,8 @@
 #define SP_PARAM_VERSION_2		UINT8_C(0x02)
 
 /*
- * This structure provides version information and the size of the
- * structure, attributes for the structure it represents
+ * This structure provides information on format used to describe
+ * secure partition invocation parameters.
  */
 struct sp_param_header {
 	uint8_t type;		/* type of the structure */
@@ -140,11 +136,8 @@ extern const struct tee_ta_ops secure_partition_ops;
 
 static inline bool is_sp_ctx(struct tee_ta_ctx *ctx __maybe_unused)
 {
-#ifdef CFG_WITH_SECURE_PARTITION
-	return ctx && ctx->ops == &secure_partition_ops;
-#else
-	return false;
-#endif
+	return IS_ENABLED(CFG_WITH_SECURE_PARTITION) &&
+	       ctx && ctx->ops == &secure_partition_ops;
 }
 
 static inline struct sec_part_ctx *to_sec_part_ctx(struct tee_ta_ctx *ctx)
