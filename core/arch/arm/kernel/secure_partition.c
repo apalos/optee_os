@@ -343,8 +343,8 @@ static TEE_Result stmm_enter_invoke_cmd(struct tee_ta_session *s,
 	mem = &param->u[0].mem;
 	ns_buf_size = mem->size;
 	if (ns_buf_size > spc->ns_comm_buf_size) {
-		mem->size = ns_buf_size;
-		return TEE_ERROR_BAD_PARAMETERS;
+		mem->size = spc->ns_comm_buf_size;
+		return TEE_ERROR_EXCESS_DATA;
 	}
 
 	res = mobj_inc_map(mem->mobj);
@@ -355,7 +355,7 @@ static TEE_Result stmm_enter_invoke_cmd(struct tee_ta_session *s,
 	if (!va) {
 		EMSG("Can't get a valid VA for NS buffer");
 		res = TEE_ERROR_BAD_PARAMETERS;
-		goto err_va;
+		goto out_va;
 	}
 
 	spc->regs.x[0] = FFA_MSG_SEND_DIRECT_REQ_64;
@@ -373,18 +373,18 @@ static TEE_Result stmm_enter_invoke_cmd(struct tee_ta_session *s,
 
 	res = sec_part_enter_user_mode(spc);
 	if (res)
-		goto err_out;
+		goto out_session;
 	/*
 	 * Copy the SPM response from secure partition back to the non-secure
-	 * the client that called us.
+	 * buffer of the client that called us.
 	 */
 	param->u[1].val.a = spc->regs.x[4];
 
 	memcpy(va, (void *)spc->ns_comm_buf_addr, ns_buf_size);
 
-err_out:
+out_session:
 	tee_ta_pop_current_session();
-err_va:
+out_va:
 	tmp_res = mobj_dec_map(mem->mobj);
 	assert(!tmp_res);
 
